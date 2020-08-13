@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+type Message struct {
+	OwnerID int
+	Content string
+}
+
 var (
 	// 新用户到来，通过该channel登记
 	enteringChannel = make(chan *User)
@@ -23,8 +28,9 @@ var (
 )
 
 func main() {
-	listener, err := net.Listen("tcp", ":2020")
+	listener, err := net.Listen("tcp", "0.0.0.0:2020")
 	if err != nil {
+		fmt.Println(err)
 		panic(err)
 	}
 
@@ -67,10 +73,31 @@ func handleConn(conn net.Conn) {
 	// 4. 记录到全局表中，避免用锁
 	enteringChannel <- user
 
+	// 7. 踢出不活跃用户
+	var userActive = make(chan struct{})
+
+	go func() {
+		d := 5 * time.Minute
+		timer := time.NewTimer(d)
+
+		for {
+			select {
+			case <-timer.C:
+				conn.Close()
+
+			case <-userActive:
+				timer.Reset(d)
+			}
+		}
+	}()
+
 	// 5. 循环读取用户输入
 	input := bufio.NewScanner(conn)
 	for input.Scan() {
-		messageChannel <- strconv.Itoa(user.ID) + "" + input.Text()
+		messageChannel <- "user " + strconv.Itoa(user.ID) + " say: \n" + input.Text()
+
+		// 活跃用户
+		userActive <- struct{}{}
 	}
 
 	if err := input.Err(); err != nil {
@@ -95,13 +122,17 @@ func (u *User) String() string {
 }
 
 func sendMessage(conn net.Conn, ch <-chan string) {
-	for msg := range ch {
-		_, _ = fmt.Fprintln(conn, msg)
+	var msg Message
+
+	for msg.Content = range ch {
+		_, _ = fmt.Fprintln(conn, msg.Content)
 	}
 }
 
 func broadcaster() {
 	users := make(map[*User]struct{})
+
+	var msg Message
 
 	for {
 		select {
@@ -118,9 +149,13 @@ func broadcaster() {
 			close(user.MessageChannel)
 
 		// 给所有在线用户发消息
-		case msg := <-messageChannel:
+		case msg.Content = <-messageChannel:
 			for user := range users {
-				user.MessageChannel <- msg
+				if user.ID == msg.OwnerID {
+					continue
+				}
+
+				user.MessageChannel <- msg.Content
 			}
 		}
 
